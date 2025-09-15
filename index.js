@@ -66,6 +66,10 @@ function addFromFirstRequest(page, params) {
     // URL is better than blank, and it's what devtools uses.
     page.title = page.title === '' ? params.request.url : page.title;
   }
+
+  if (!page.__loaderId && params.loaderId) {
+    page.__loaderId = params.loaderId;
+  }
 }
 
 function addFromFirstResponse(page, params, wallTimeHelper) {
@@ -96,7 +100,6 @@ function populateRedirectResponse(page, params, entries, options) {
     populateEntryFromResponse(
       previousEntry,
       params.redirectResponse,
-      page,
       options
     );
   } else {
@@ -232,7 +235,6 @@ export function harFromMessages(messages, options) {
                   populateEntryFromResponse(
                     entry,
                     params.response,
-                    page,
                     options
                   );
                 } else {
@@ -287,7 +289,6 @@ export function harFromMessages(messages, options) {
                 populateEntryFromResponse(
                   entry,
                   params.response,
-                  page,
                   options
                 );
               } else {
@@ -571,7 +572,7 @@ export function harFromMessages(messages, options) {
           }
 
           try {
-            populateEntryFromResponse(entry, params.response, page, options);
+            populateEntryFromResponse(entry, params.response, options);
           } catch (error) {
             log(
               `Error parsing response: ${JSON.stringify(params, undefined, 2)}`
