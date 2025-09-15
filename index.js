@@ -9,10 +9,16 @@ import {
   formatMillis,
   parsePostData,
   isSupportedProtocol,
-  toNameValuePairs
+  toNameValuePairs,
+  blockedResponse,
+  blockedTimings
 } from './lib/util.js';
 import populateEntryFromResponse from './lib/entryFromResponse.js';
 import finalizeEntry from './lib/finalizeEntry.js';
+import { 
+  createSyntheticEventFromFrameNavigated, 
+  createSyntheticEventFromResponse 
+} from './lib/syntheticEventsCreator.js';
 
 const require = createRequire(import.meta.url);
 const version = require('./package.json').version;
@@ -21,7 +27,15 @@ const log = debug('chrome-har');
 const defaultOptions = {
   includeResourcesFromDiskCache: false,
   includeTextFromResponseBody: false,
-  useFrameNavigatedEvent: false // When true, uses Page.frameNavigated instead of Page.frameStartedLoading
+  useFrameNavigatedEvent: false, // When true, uses Page.frameNavigated instead of Page.frameStartedLoading
+  wallTimeHelper: {
+    getWallTimeFromTimestamp(timestamp) {
+      return undefined;
+    },
+    getTimestampFromWallTime(wallTime) {
+      return undefined;
+    }
+  }
 };
 const isEmpty = o => !o;
 
@@ -42,6 +56,25 @@ function addFromFirstRequest(page, params) {
     page.startedDateTime = new Date(params.wallTime * 1000).toISOString();
     // URL is better than blank, and it's what devtools uses.
     page.title = page.title === '' ? params.request.url : page.title;
+  }
+}
+
+function addFromFirstResponse(page, params, wallTimeHelper) {
+  const { response, loaderId } = params;
+  if (!page.__timestamp) {
+    page.__timestamp = response.timing.requestTime;
+  }
+
+  const wallTime = wallTimeHelper.getWallTimeFromTimestamp(response.timing.requestTime);
+  if (wallTime) {
+    page.__wallTime = wallTime;
+    page.startedDateTime = new Date(wallTime * 1000).toISOString(); //epoch float64, eg 1440589909.59248
+  }
+  // URL is better than blank, and it's what devtools uses.
+  page.title = response.url;
+
+  if (!page.__loaderId && loaderId) {
+    page.__loaderId = loaderId;
   }
 }
 
@@ -70,7 +103,8 @@ export function harFromMessages(messages, options) {
   options = Object.assign({}, defaultOptions, options);
 
   const ignoredRequests = new Set(),
-    rootFrameMappings = new Map();
+    rootFrameMappings = new Map(),
+    loaders = new Map();
 
   let pages = [],
     entries = [],
@@ -114,21 +148,49 @@ export function harFromMessages(messages, options) {
             }
             
             // Check if we've already seen this navigation
-            const frameId = params.frame.id;
-            const rootFrame = rootFrameMappings.get(frameId) || frameId;
-            if (pages.some(page => page.__frameId === rootFrame)) {
+            if (pages.some(page => page.__loaderId === params.frame.loaderId)) {
               continue;
             }
             
+            const prevRoot = pages.find(page => page.__frameId === undefined);
+            if (prevRoot && prevRoot.loaderId) {
+              prevRoot.__frameId = "removed";
+            }
+            
+            currentPageId = randomUUID();
             const page = {
-              id: randomUUID(),
+              id: currentPageId,
               startedDateTime: '',
               title: params.frame.url,
               pageTimings: {},
-              __frameId: rootFrame
+              __loaderId: params.frame.loaderId,
+              __frameId: params.frame.id,
             };
             
-            currentPageId = page.id;
+            const firstRequest = loaders.get(params.frame.loaderId);
+            if (firstRequest) {
+              addFromFirstRequest(page, firstRequest);
+            } else {
+              // try to create a synthetic event.
+              // this use-case usually happens when the debugger
+              // is attached after the page request was sent, but before
+              // the response was received. We assume that
+              // the page is request is one of the first 10 messages.
+              const responseInfo = messages.slice(0, 10)
+                .find(x => x.method === 'Network.responseReceived' && x.params.requestId === params.frame.loaderId);
+
+              if (responseInfo) {
+                const responseParams = responseInfo.params;
+                addFromFirstResponse(page, responseParams, options.wallTimeHelper);
+                const entry = createSyntheticEventFromResponse(page, responseParams);
+                entries.push(entry);
+              } else {
+                // totally without a request, do something.
+                const entry = createSyntheticEventFromFrameNavigated(page, params)
+                entries.push(entry);
+              }
+            }
+            
             pages.push(page);
             
             // Handle unmapped requests
@@ -232,6 +294,12 @@ export function harFromMessages(messages, options) {
             ignoredRequests.add(params.requestId);
             continue;
           }
+          
+          // Set this request as the loader for the page
+          if (!loaders.has(params.loaderId)) {
+            loaders.set(params.loaderId, params);
+          }
+          
           const page = pages.at(-1);
           const cookieHeader = getHeaderValue(request.headers, 'Cookie');
 
@@ -630,7 +698,6 @@ export function harFromMessages(messages, options) {
       case 'Network.loadingFailed': {
         {
           if (ignoredRequests.has(params.requestId)) {
-            ignoredRequests.delete(params.requestId);
             continue;
           }
 
@@ -644,22 +711,12 @@ export function harFromMessages(messages, options) {
             continue;
           }
 
-          if (params.errorText === 'net::ERR_ABORTED') {
-            finalizeEntry(entry, params);
-            log(
-              `Loading was canceled due to Chrome or a user action for requestId ${params.requestId}.`
-            );
-            continue;
-          }
-
-          // This could be due to incorrect domain name etc. Sad, but unfortunately not something that a HAR file can
-          // represent.
-          log(
-            `Failed to load url '${entry.request.url}' (canceled: ${params.canceled})`
-          );
-          entries = entries.filter(
-            entry => entry._requestId !== params.requestId
-          );
+          entry._transferSize = 0;
+          entry.request.httpVersion = entry.request.httpVersion || "";
+          entry.response = Object.assign(entry.response || blockedResponse(), { _error: params.errorText });
+          entry.timings = entry.timings || blockedTimings();
+          entry.serverIPAddress = "";
+          entry.comment = `Error: ${params.errorText}${params.blockedReason ? `. Reason: ${params.blockedReason}` : ''}`
         }
         break;
       }
