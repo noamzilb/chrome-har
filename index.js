@@ -11,7 +11,8 @@ import {
   isSupportedProtocol,
   toNameValuePairs,
   blockedResponse,
-  blockedTimings
+  blockedTimings,
+  cachedTimings
 } from './lib/util.js';
 import populateEntryFromResponse from './lib/entryFromResponse.js';
 import finalizeEntry from './lib/finalizeEntry.js';
@@ -638,7 +639,18 @@ export function harFromMessages(messages, options) {
             continue;
           }
 
-          finalizeEntry(entry, params);
+          // Handle cached vs non-cached timing
+          if(entry._fromCache === 'memory') {
+            entry.time = 0;
+            entry.timings = cachedTimings(entry.__requestWillBeSentTime, params.timestamp);
+          } else {
+            const timings = entry.timings || {};
+            const startTime = entry.__requestWillBeSentTime || entry._requestTime;
+            timings.receive = formatMillis((params.timestamp - startTime) * 1000 - entry.__receiveHeadersEnd);
+            const fullTime = Math.max(0, timings.blocked) + Math.max(0, timings.dns) + Math.max(0, timings.connect) +
+              Math.max(0, timings.send) + Math.max(0, timings.wait) + Math.max(0, timings.receive);
+            entry.time = Math.floor(1000 * fullTime) / 1000;
+          }
         }
         break;
       }
