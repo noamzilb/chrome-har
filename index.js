@@ -28,6 +28,7 @@ const log = debug('chrome-har');
 const defaultOptions = {
   includeResourcesFromDiskCache: false,
   includeTextFromResponseBody: false,
+  includeCustomProperties: false,
   useFrameNavigatedEvent: false, // When true, uses Page.frameNavigated instead of Page.frameStartedLoading
   wallTimeHelper: {
     getWallTimeFromTimestamp(timestamp) {
@@ -39,6 +40,13 @@ const defaultOptions = {
   }
 };
 const isEmpty = o => !o;
+
+function attachCustomProps(entry, params) {
+  const custom = params['_custom'];
+  if (custom) {
+    entry._custom = Object.assign(entry._custom || {}, custom);
+  }
+}
 
 const deleteInternalProperties = o => {
   // __ properties are only for internal use, _ properties are custom properties for the HAR
@@ -184,6 +192,9 @@ export function harFromMessages(messages, options) {
                 const responseParams = responseInfo.params;
                 addFromFirstResponse(page, responseParams, options.wallTimeHelper);
                 const entry = createSyntheticEventFromResponse(page, responseParams);
+                if (options.includeCustomProperties) {
+                  attachCustomProps(entry, responseParams);
+                }
                 entries.push(entry);
               } else {
                 // totally without a request, do something.
@@ -348,6 +359,10 @@ export function harFromMessages(messages, options) {
             // Chrome's DevTools Frontend returns this field in lower case
             _resourceType: params.type ? params.type.toLowerCase() : undefined
           };
+
+          if (options.includeCustomProperties) {
+            attachCustomProps(entry, params);
+          }
 
           // The object initiator change according to its type
           switch (params.initiator.type) {
@@ -540,6 +555,10 @@ export function harFromMessages(messages, options) {
             continue;
           }
 
+          if (options.includeCustomProperties) {
+            attachCustomProps(entry, params);
+          }
+
           const frameId =
             rootFrameMappings.get(params.frameId) || params.frameId;
           const page =
@@ -639,6 +658,10 @@ export function harFromMessages(messages, options) {
             continue;
           }
 
+          if (options.includeCustomProperties) {
+            attachCustomProps(entry, params);
+          }
+
           // Handle cached vs non-cached timing
           if(entry._fromCache === 'memory') {
             entry.time = 0;
@@ -723,6 +746,10 @@ export function harFromMessages(messages, options) {
             continue;
           }
 
+          if (options.includeCustomProperties) {
+            attachCustomProps(entry, params);
+          }
+
           entry._transferSize = 0;
           entry.request.httpVersion = entry.request.httpVersion || "";
           entry.response = Object.assign(entry.response || blockedResponse(), { _error: params.errorText });
@@ -796,16 +823,20 @@ export function harFromMessages(messages, options) {
   });
 
   // FIXME sanity check if there are any pages/entries created
-  return {
-    log: {
-      version: '1.2',
-      creator: {
-        name: 'chrome-har',
-        version,
-        comment: 'https://github.com/sitespeedio/chrome-har'
-      },
-      pages,
-      entries
-    }
+  const logData = {
+    version: '1.2',
+    creator: {
+      name: options.name || 'chrome-har',
+      version: options.version || version,
+      comment: options.comment || 'https://github.com/sitespeedio/chrome-har'
+    },
+    pages,
+    entries
   };
+
+  if (options.meta !== undefined) {
+    logData._meta = options.meta;
+  }
+
+  return { log: logData };
 }
