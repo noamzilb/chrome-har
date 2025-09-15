@@ -20,7 +20,8 @@ const log = debug('chrome-har');
 
 const defaultOptions = {
   includeResourcesFromDiskCache: false,
-  includeTextFromResponseBody: false
+  includeTextFromResponseBody: false,
+  useFrameNavigatedEvent: false // When true, uses Page.frameNavigated instead of Page.frameStartedLoading
 };
 const isEmpty = o => !o;
 
@@ -91,8 +92,85 @@ export function harFromMessages(messages, options) {
     switch (method) {
       case 'Page.frameStartedLoading':
       case 'Page.frameRequestedNavigation':
+      case 'Page.frameNavigated':
       case 'Page.navigatedWithinDocument': {
         {
+          // Skip frameStartedLoading/frameRequestedNavigation if useFrameNavigatedEvent is true
+          if (options.useFrameNavigatedEvent && 
+              (method === 'Page.frameStartedLoading' || method === 'Page.frameRequestedNavigation')) {
+            continue;
+          }
+          
+          // Skip frameNavigated if useFrameNavigatedEvent is false
+          if (!options.useFrameNavigatedEvent && method === 'Page.frameNavigated') {
+            continue;
+          }
+
+          // Handle frameNavigated differently
+          if (method === 'Page.frameNavigated') {
+            // For frameNavigated, we need to check if it's the root frame
+            if (params.frame && params.frame.parentId) {
+              continue; // Skip non-root frames
+            }
+            
+            // Check if we've already seen this navigation
+            const frameId = params.frame.id;
+            const rootFrame = rootFrameMappings.get(frameId) || frameId;
+            if (pages.some(page => page.__frameId === rootFrame)) {
+              continue;
+            }
+            
+            const page = {
+              id: randomUUID(),
+              startedDateTime: '',
+              title: params.frame.url,
+              pageTimings: {},
+              __frameId: rootFrame
+            };
+            
+            currentPageId = page.id;
+            pages.push(page);
+            
+            // Handle unmapped requests
+            if (entriesWithoutPage.length > 0) {
+              for (let entry of entriesWithoutPage) {
+                entry.pageref = page.id;
+              }
+              entries = entries.concat(entriesWithoutPage);
+              if (paramsWithoutPage[0]) {
+                addFromFirstRequest(page, paramsWithoutPage[0]);
+              }
+              
+              // Add unmapped redirects
+              for (let params of paramsWithoutPage) {
+                if (params.redirectResponse) {
+                  populateRedirectResponse(page, params, entries, options);
+                }
+              }
+            }
+
+            if (responsesWithoutPage.length > 0) {
+              for (let params of responsesWithoutPage) {
+                let entry = entries.find(
+                  entry => entry._requestId === params.requestId
+                );
+                if (entry) {
+                  populateEntryFromResponse(
+                    entry,
+                    params.response,
+                    page,
+                    options
+                  );
+                } else {
+                  log(`Couldn't find matching request for response`);
+                }
+              }
+            }
+            
+            continue;
+          }
+
+          // Original logic for frameStartedLoading, frameRequestedNavigation, and navigatedWithinDocument
           const frameId = params.frameId;
           const rootFrame = rootFrameMappings.get(frameId) || frameId;
           if (pages.some(page => page.__frameId === rootFrame)) {
